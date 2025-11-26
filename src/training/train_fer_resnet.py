@@ -32,7 +32,9 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: optim.Optimizer,
     device: torch.device,
-    epoch: int
+    epoch: int,
+    scaler: torch.cuda.amp.GradScaler = None,
+    use_amp: bool = False
 ) -> tuple[float, float]:
     """
     Train the model for one epoch.
@@ -44,6 +46,8 @@ def train_one_epoch(
         optimizer: Optimizer
         device: Device to train on
         epoch: Current epoch number
+        scaler: GradScaler for automatic mixed precision (AMP)
+        use_amp: Whether to use AMP for faster training on GPU
         
     Returns:
         avg_loss: Average training loss
@@ -61,13 +65,25 @@ def train_one_epoch(
         # Zero the parameter gradients
         optimizer.zero_grad()
         
-        # Forward pass
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        
-        # Backward pass and optimize
-        loss.backward()
-        optimizer.step()
+        # Forward pass with optional AMP (Automatic Mixed Precision)
+        # AMP uses float16 for faster computation on RTX 4060 while maintaining accuracy
+        if use_amp:
+            with torch.cuda.amp.autocast():
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+            
+            # Backward pass with gradient scaling for mixed precision
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # Standard full-precision training (CPU or no AMP)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
         
         # Statistics
         running_loss += loss.item() * images.size(0)
@@ -402,9 +418,16 @@ def main(args):
     # Learning rate scheduler
     scheduler = StepLR(optimizer, step_size=7, gamma=0.1)
     
+    # Automatic Mixed Precision (AMP) setup for faster training on CUDA
+    # AMP uses float16 where safe, reducing memory usage and speeding up training
+    # on RTX 4060 without sacrificing model accuracy
+    use_amp = device.type == 'cuda'
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    
     print(f"\nLoss Function: CrossEntropyLoss")
     print(f"Optimizer: Adam (lr={args.lr})")
     print(f"Scheduler: StepLR (step_size=7, gamma=0.1)")
+    print(f"Mixed Precision (AMP): {'Enabled' if use_amp else 'Disabled (CPU mode)'}")
     
     # Training tracking
     best_val_accuracy = 0.0
@@ -469,7 +492,8 @@ def main(args):
         
         # Train
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch
+            model, train_loader, criterion, optimizer, device, epoch,
+            scaler=scaler, use_amp=use_amp
         )
         
         # Validate
