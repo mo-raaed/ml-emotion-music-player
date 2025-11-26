@@ -176,12 +176,14 @@ def test_model(
 def save_checkpoint(
     model: nn.Module,
     optimizer: optim.Optimizer,
+    scheduler: optim.lr_scheduler._LRScheduler,
     epoch: int,
     val_accuracy: float,
     train_loss: float,
     val_loss: float,
     filepath: str,
-    class_names: list
+    class_names: list,
+    best_val_accuracy: float = None
 ):
     """
     Save model checkpoint.
@@ -189,20 +191,24 @@ def save_checkpoint(
     Args:
         model: The neural network model
         optimizer: Optimizer
+        scheduler: Learning rate scheduler
         epoch: Current epoch
         val_accuracy: Validation accuracy
         train_loss: Training loss
         val_loss: Validation loss
         filepath: Path to save checkpoint
         class_names: List of class names
+        best_val_accuracy: Best validation accuracy so far
     """
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
         'val_accuracy': val_accuracy,
         'train_loss': train_loss,
         'val_loss': val_loss,
+        'best_val_accuracy': best_val_accuracy if best_val_accuracy is not None else val_accuracy,
         'class_names': class_names,
         'num_classes': len(class_names),
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -211,7 +217,13 @@ def save_checkpoint(
     print(f"  → Checkpoint saved to {filepath}")
 
 
-def load_checkpoint(filepath: str, model: nn.Module, optimizer: optim.Optimizer = None):
+def load_checkpoint(
+    filepath: str, 
+    model: nn.Module, 
+    optimizer: optim.Optimizer = None,
+    scheduler: optim.lr_scheduler._LRScheduler = None,
+    device: torch.device = None
+):
     """
     Load model checkpoint.
     
@@ -219,15 +231,23 @@ def load_checkpoint(filepath: str, model: nn.Module, optimizer: optim.Optimizer 
         filepath: Path to checkpoint file
         model: Model to load weights into
         optimizer: Optional optimizer to load state into
+        scheduler: Optional scheduler to load state into
+        device: Device to map checkpoint to
         
     Returns:
         checkpoint: Dictionary containing checkpoint data
     """
-    checkpoint = torch.load(filepath)
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    checkpoint = torch.load(filepath, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    if optimizer is not None:
+    if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    if scheduler is not None and 'scheduler_state_dict' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     
     return checkpoint
 
@@ -314,14 +334,26 @@ def main(args):
     print("=" * 80)
     print("FER2013 Emotion Recognition Training")
     print("=" * 80)
+    
+    # Check if resuming from checkpoint
+    resume_from_checkpoint = args.resume is not None and os.path.exists(args.resume)
+    
+    if resume_from_checkpoint:
+        print(f"\n*** RESUMING TRAINING FROM CHECKPOINT ***")
+        print(f"Checkpoint: {args.resume}")
+    else:
+        print(f"\n*** STARTING TRAINING FROM SCRATCH ***")
+    
     print(f"\nTraining Configuration:")
     print(f"  Dataset: FER2013 (4 classes)")
-    print(f"  Model: ResNet-18 (Random Initialization)")
-    print(f"  Epochs: {args.epochs}")
+    print(f"  Model: ResNet-18 {'(Resuming)' if resume_from_checkpoint else '(Random Initialization)'}")
+    print(f"  Target Epochs: {args.epochs}")
     print(f"  Batch Size: {args.batch_size}")
     print(f"  Learning Rate: {args.lr}")
     print(f"  CSV Path: {args.csv_path}")
     print(f"  Checkpoint Dir: {args.checkpoint_dir}")
+    if resume_from_checkpoint:
+        print(f"  Resume From: {args.resume}")
     
     # Create checkpoint directory
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -377,19 +409,59 @@ def main(args):
     # Training tracking
     best_val_accuracy = 0.0
     best_epoch = 0
+    start_epoch = 1
     train_losses = []
     val_losses = []
     train_accs = []
     val_accs = []
     
+    # Load checkpoint if resuming
+    if resume_from_checkpoint:
+        print("\n" + "=" * 80)
+        print("Loading Checkpoint...")
+        print("=" * 80)
+        
+        checkpoint = load_checkpoint(
+            args.resume,
+            model,
+            optimizer,
+            scheduler,
+            device
+        )
+        
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_accuracy = checkpoint.get('best_val_accuracy', checkpoint.get('val_accuracy', 0.0))
+        best_epoch = checkpoint['epoch']
+        
+        print(f"\nCheckpoint loaded successfully!")
+        print(f"  Resuming from epoch: {checkpoint['epoch']}")
+        print(f"  Best validation accuracy: {best_val_accuracy:.2f}%")
+        print(f"  Previous train loss: {checkpoint.get('train_loss', 'N/A')}")
+        print(f"  Previous val loss: {checkpoint.get('val_loss', 'N/A')}")
+        print(f"  Current learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+        
+        # Validate target epochs
+        if args.epochs <= checkpoint['epoch']:
+            print(f"\n⚠ Warning: Target epochs ({args.epochs}) <= checkpoint epoch ({checkpoint['epoch']})")
+            print(f"  No additional training will be performed.")
+            print(f"  To continue training, specify --epochs > {checkpoint['epoch']}")
+            return
+        
+        print(f"\nWill train from epoch {start_epoch} to {args.epochs}")
+        print(f"Additional epochs to train: {args.epochs - checkpoint['epoch']}")
+        print("=" * 80)
+    
     # Training loop
     print("\n" + "=" * 80)
-    print("Starting Training...")
+    if resume_from_checkpoint:
+        print(f"Resuming Training from Epoch {start_epoch}...")
+    else:
+        print("Starting Training...")
     print("=" * 80)
     
     start_time = time.time()
     
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         epoch_start = time.time()
         
         print(f"\nEpoch [{epoch}/{args.epochs}]")
@@ -429,8 +501,8 @@ def main(args):
             best_epoch = epoch
             checkpoint_path = os.path.join(args.checkpoint_dir, 'fer_resnet18_best.pth')
             save_checkpoint(
-                model, optimizer, epoch, val_acc, train_loss, val_loss,
-                checkpoint_path, CLASS_NAMES
+                model, optimizer, scheduler, epoch, val_acc, train_loss, val_loss,
+                checkpoint_path, CLASS_NAMES, best_val_accuracy
             )
             print(f"  *** New best validation accuracy: {val_acc:.2f}% ***")
         
@@ -441,7 +513,14 @@ def main(args):
     print("\n" + "=" * 80)
     print("Training Completed!")
     print("=" * 80)
-    print(f"Total training time: {total_time / 60:.2f} minutes")
+    
+    if resume_from_checkpoint:
+        print(f"Training session: Epoch {start_epoch} → {args.epochs}")
+        print(f"Total epochs completed: {args.epochs}")
+    else:
+        print(f"Training session: Epoch 1 → {args.epochs}")
+    
+    print(f"Session training time: {total_time / 60:.2f} minutes")
     print(f"Best validation accuracy: {best_val_accuracy:.2f}% (Epoch {best_epoch})")
     
     # Plot training history
@@ -454,10 +533,10 @@ def main(args):
     print("=" * 80)
     
     best_checkpoint_path = os.path.join(args.checkpoint_dir, 'fer_resnet18_best.pth')
-    checkpoint = load_checkpoint(best_checkpoint_path, model)
+    checkpoint = load_checkpoint(best_checkpoint_path, model, device=device)
     
     print(f"\nLoaded best model from epoch {checkpoint['epoch']}")
-    print(f"Validation accuracy: {checkpoint['val_accuracy']:.2f}%")
+    print(f"Validation accuracy: {checkpoint.get('val_accuracy', checkpoint.get('best_val_accuracy', 'N/A')):.2f}%")
     
     # Test on test set
     test_acc, test_labels, test_predictions = test_model(
@@ -562,6 +641,13 @@ def parse_args():
         type=int,
         default=4,
         help='Number of data loading workers (default: 4)'
+    )
+    
+    parser.add_argument(
+        '--resume',
+        type=str,
+        default=None,
+        help='Path to checkpoint to resume training from (e.g., models/fer_resnet18_best.pth)'
     )
     
     return parser.parse_args()
