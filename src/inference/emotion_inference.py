@@ -21,17 +21,24 @@ class EmotionPredictor:
     """
     Emotion predictor class that loads a trained model and performs inference.
     
+    Supports confidence-based filtering to improve precision by rejecting
+    low-confidence predictions. Only predictions with softmax probability
+    above the confidence_threshold are considered valid.
+    
     Attributes:
         model: Loaded FerResNet18 model
         device: Device (CPU or CUDA) where model is running
         class_names: List of emotion class names
         checkpoint_path: Path to the loaded checkpoint
+        confidence_threshold: Minimum confidence (softmax probability) required
+                            for a prediction to be considered valid (default: 0.8)
     """
     
     def __init__(
         self,
         checkpoint_path: str = 'models/fer_resnet18_best.pth',
-        use_gpu_if_available: bool = True
+        use_gpu_if_available: bool = True,
+        confidence_threshold: float = 0.8
     ):
         """
         Initialize the emotion predictor.
@@ -39,8 +46,17 @@ class EmotionPredictor:
         Args:
             checkpoint_path: Path to the trained model checkpoint
             use_gpu_if_available: Whether to use GPU if available
+            confidence_threshold: Minimum softmax probability (0-1) required for
+                                a prediction to be considered valid. Higher values
+                                increase precision but may reduce recall. Default: 0.8
+                                
+        Note:
+            The confidence_threshold trades recall for precision. Predictions below
+            this threshold are marked as low-confidence and should be ignored or
+            treated as "unknown" by downstream applications (e.g., the music player).
         """
         self.checkpoint_path = checkpoint_path
+        self.confidence_threshold = confidence_threshold
         
         # Determine device
         if use_gpu_if_available and torch.cuda.is_available():
@@ -56,6 +72,7 @@ class EmotionPredictor:
         
         print(f"Model loaded successfully from: {checkpoint_path}")
         print(f"Classes: {self.class_names}")
+        print(f"Confidence threshold: {self.confidence_threshold:.2f} (predictions below this are marked as low-confidence)")
     
     def _load_model(self) -> Tuple[FerResNet18, list]:
         """
@@ -139,17 +156,31 @@ class EmotionPredictor:
     def predict(
         self,
         face_image: np.ndarray
-    ) -> Tuple[str, int, np.ndarray]:
+    ) -> dict:
         """
-        Predict emotion from a face image.
+        Predict emotion from a face image with confidence-based filtering.
+        
+        This method applies a confidence threshold to filter out uncertain predictions.
+        Only predictions with softmax probability >= confidence_threshold are considered
+        valid. This trades recall for higher precision.
         
         Args:
             face_image: Face image (grayscale or BGR)
             
         Returns:
-            label_str: Predicted emotion label string
-            label_idx: Predicted emotion label index
-            probabilities: Class probabilities as numpy array
+            dict with keys:
+                - 'label': Predicted emotion label string (or None if low confidence)
+                - 'index': Predicted emotion label index (or None if low confidence)
+                - 'probabilities': Full softmax probability vector as numpy array
+                - 'max_prob': Maximum probability value (confidence score)
+                - 'is_confident': Boolean indicating if prediction meets threshold
+                
+        Example:
+            >>> result = predictor.predict(face_image)
+            >>> if result['is_confident']:
+            >>>     print(f"Emotion: {result['label']} ({result['max_prob']:.2%})")
+            >>> else:
+            >>>     print(f"Low confidence: {result['max_prob']:.2%} < threshold")
         """
         # Preprocess image
         face_tensor = self.preprocess_face(face_image)
@@ -163,26 +194,48 @@ class EmotionPredictor:
         # Get prediction
         prob_values = probabilities.cpu().numpy()[0]
         label_idx = int(np.argmax(prob_values))
-        label_str = self.class_names[label_idx]
+        max_prob = float(prob_values[label_idx])
         
-        return label_str, label_idx, prob_values
+        # Apply confidence threshold
+        is_confident = max_prob >= self.confidence_threshold
+        
+        if is_confident:
+            label_str = self.class_names[label_idx]
+        else:
+            # Low confidence - return None to indicate uncertain prediction
+            label_str = None
+            label_idx = None
+        
+        return {
+            'label': label_str,
+            'index': label_idx,
+            'probabilities': prob_values,
+            'max_prob': max_prob,
+            'is_confident': is_confident
+        }
     
     def predict_emotion_from_frame(
         self,
         frame_bgr: np.ndarray,
         face_bbox: Tuple[int, int, int, int]
-    ) -> Tuple[str, int, np.ndarray]:
+    ) -> dict:
         """
         Predict emotion from a frame with a face bounding box.
+        
+        This method applies confidence-based filtering. Predictions below
+        the confidence_threshold are marked as low-confidence.
         
         Args:
             frame_bgr: OpenCV BGR image (full frame)
             face_bbox: Face bounding box as (x, y, w, h)
             
         Returns:
-            label_str: Predicted emotion label string
-            label_idx: Predicted emotion label index
-            probabilities: Class probabilities as numpy array
+            dict with keys:
+                - 'label': Predicted emotion label string (or None if low confidence)
+                - 'index': Predicted emotion label index (or None if low confidence)
+                - 'probabilities': Full softmax probability vector as numpy array
+                - 'max_prob': Maximum probability value (confidence score)
+                - 'is_confident': Boolean indicating if prediction meets threshold
         """
         x, y, w, h = face_bbox
         
@@ -201,13 +254,47 @@ class EmotionPredictor:
         
         # Predict emotion
         return self.predict(face_crop)
+    
+    def predict_legacy(
+        self,
+        face_image: np.ndarray
+    ) -> Tuple[str, int, np.ndarray]:
+        """
+        Legacy prediction method that returns tuple format for backward compatibility.
+        
+        This method ignores the confidence threshold and always returns a prediction.
+        Use predict() for confidence-based filtering.
+        
+        Args:
+            face_image: Face image (grayscale or BGR)
+            
+        Returns:
+            label_str: Predicted emotion label string
+            label_idx: Predicted emotion label index
+            probabilities: Class probabilities as numpy array
+            
+        Note:
+            This method is provided for backward compatibility. New code should
+            use the predict() method which returns a dict with confidence information.
+        """
+        result = self.predict(face_image)
+        
+        # If not confident, still return the prediction (backward compatible)
+        if not result['is_confident']:
+            # Get the argmax prediction even if below threshold
+            label_idx = int(np.argmax(result['probabilities']))
+            label_str = self.class_names[label_idx]
+            return label_str, label_idx, result['probabilities']
+        
+        return result['label'], result['index'], result['probabilities']
 
 
 def predict_emotion_from_frame(
     frame_bgr: np.ndarray,
     face_bbox: Tuple[int, int, int, int],
-    checkpoint_path: str = 'models/fer_resnet18_best.pth'
-) -> Tuple[str, int, np.ndarray]:
+    checkpoint_path: str = 'models/fer_resnet18_best.pth',
+    confidence_threshold: float = 0.8
+) -> dict:
     """
     Convenience function to predict emotion from a frame.
     
@@ -218,19 +305,24 @@ def predict_emotion_from_frame(
         frame_bgr: OpenCV BGR image
         face_bbox: Face bounding box as (x, y, w, h)
         checkpoint_path: Path to model checkpoint
+        confidence_threshold: Minimum confidence for valid predictions (default: 0.8)
         
     Returns:
-        label_str: Predicted emotion label string
-        label_idx: Predicted emotion label index
-        probabilities: Class probabilities as numpy array
+        dict with keys:
+            - 'label': Predicted emotion label string (or None if low confidence)
+            - 'index': Predicted emotion label index (or None if low confidence)
+            - 'probabilities': Full softmax probability vector as numpy array
+            - 'max_prob': Maximum probability value (confidence score)
+            - 'is_confident': Boolean indicating if prediction meets threshold
         
     Example:
         >>> frame = cv2.imread('image.jpg')
         >>> bbox = (100, 100, 150, 150)
-        >>> emotion, idx, probs = predict_emotion_from_frame(frame, bbox)
-        >>> print(f"Emotion: {emotion}, Confidence: {probs[idx]:.2%}")
+        >>> result = predict_emotion_from_frame(frame, bbox)
+        >>> if result['is_confident']:
+        >>>     print(f"Emotion: {result['label']} ({result['max_prob']:.2%})")
     """
-    predictor = EmotionPredictor(checkpoint_path)
+    predictor = EmotionPredictor(checkpoint_path, confidence_threshold=confidence_threshold)
     return predictor.predict_emotion_from_frame(frame_bgr, face_bbox)
 
 
@@ -320,14 +412,25 @@ if __name__ == "__main__":
     # Create random 48x48 grayscale image
     random_face = np.random.randint(0, 256, (48, 48), dtype=np.uint8)
     
-    emotion, label_idx, probabilities = predictor.predict(random_face)
+    result = predictor.predict(random_face)
     
     print(f"\nPrediction Results:")
-    print(f"  Predicted Emotion: {emotion}")
-    print(f"  Label Index: {label_idx}")
+    print(f"  Predicted Emotion: {result['label'] if result['is_confident'] else 'LOW CONFIDENCE'}")
+    print(f"  Label Index: {result['index']}")
+    print(f"  Max Probability: {result['max_prob']:.4f} ({result['max_prob']*100:.2f}%)")
+    print(f"  Confidence Status: {'✓ CONFIDENT' if result['is_confident'] else '✗ LOW CONFIDENCE'}")
+    print(f"  Threshold: {predictor.confidence_threshold:.2f}")
+    
+    if not result['is_confident']:
+        # Show what it would have predicted
+        predicted_idx = int(np.argmax(result['probabilities']))
+        print(f"  (Would have predicted: {CLASS_NAMES[predicted_idx]} at {result['max_prob']:.2%})")
+    
     print(f"\nClass Probabilities:")
-    for i, (class_name, prob) in enumerate(zip(CLASS_NAMES, probabilities)):
-        marker = " <--" if i == label_idx else ""
+    for i, (class_name, prob) in enumerate(zip(CLASS_NAMES, result['probabilities'])):
+        marker = " <-- PREDICTED" if (result['is_confident'] and i == result['index']) else ""
+        if not result['is_confident'] and i == np.argmax(result['probabilities']):
+            marker = " <-- (low confidence)"
         print(f"  {class_name:8s}: {prob:.4f} ({prob*100:.2f}%){marker}")
     
     # Test 2: Predict from frame with bounding box
@@ -342,12 +445,13 @@ if __name__ == "__main__":
     print(f"Frame shape: {frame.shape}")
     print(f"Face bbox: {face_bbox}")
     
-    emotion, label_idx, probabilities = predictor.predict_emotion_from_frame(frame, face_bbox)
+    result = predictor.predict_emotion_from_frame(frame, face_bbox)
     
     print(f"\nPrediction Results:")
-    print(f"  Predicted Emotion: {emotion}")
-    print(f"  Label Index: {label_idx}")
-    print(f"  Confidence: {probabilities[label_idx]:.4f} ({probabilities[label_idx]*100:.2f}%)")
+    print(f"  Predicted Emotion: {result['label'] if result['is_confident'] else 'LOW CONFIDENCE'}")
+    print(f"  Label Index: {result['index']}")
+    print(f"  Max Probability: {result['max_prob']:.4f} ({result['max_prob']*100:.2f}%)")
+    print(f"  Confidence Status: {'✓ CONFIDENT' if result['is_confident'] else '✗ LOW CONFIDENCE'}")
     
     # Test 3: Load from FER2013 dataset if available
     csv_path = 'data/fer2013.csv'
@@ -367,17 +471,28 @@ if __name__ == "__main__":
             print(f"True label: {CLASS_NAMES[true_label]}")
             
             # Predict
-            emotion, label_idx, probabilities = predictor.predict(sample_image)
+            result = predictor.predict(sample_image)
             
             print(f"\nPrediction Results:")
-            print(f"  Predicted: {emotion}")
-            print(f"  True label: {CLASS_NAMES[true_label]}")
-            print(f"  Match: {'✓ Correct' if label_idx == true_label else '✗ Incorrect'}")
-            print(f"  Confidence: {probabilities[label_idx]:.4f} ({probabilities[label_idx]*100:.2f}%)")
+            if result['is_confident']:
+                print(f"  Predicted: {result['label']}")
+                print(f"  True label: {CLASS_NAMES[true_label]}")
+                print(f"  Match: {'✓ Correct' if result['index'] == true_label else '✗ Incorrect'}")
+            else:
+                print(f"  Predicted: LOW CONFIDENCE")
+                print(f"  True label: {CLASS_NAMES[true_label]}")
+                predicted_idx = int(np.argmax(result['probabilities']))
+                print(f"  (Would have predicted: {CLASS_NAMES[predicted_idx]})")
+            print(f"  Max Probability: {result['max_prob']:.4f} ({result['max_prob']*100:.2f}%)")
+            print(f"  Confidence Status: {'✓ CONFIDENT' if result['is_confident'] else '✗ LOW CONFIDENCE'}")
             
             print(f"\nAll Probabilities:")
-            for i, (class_name, prob) in enumerate(zip(CLASS_NAMES, probabilities)):
-                marker = " <-- PREDICTED" if i == label_idx else ""
+            for i, (class_name, prob) in enumerate(zip(CLASS_NAMES, result['probabilities'])):
+                marker = ""
+                if result['is_confident'] and i == result['index']:
+                    marker = " <-- PREDICTED"
+                elif not result['is_confident'] and i == np.argmax(result['probabilities']):
+                    marker = " <-- (low confidence)"
                 true_marker = " <-- TRUE" if i == true_label else ""
                 print(f"  {class_name:8s}: {prob:.4f} ({prob*100:.2f}%){marker}{true_marker}")
                 
@@ -422,8 +537,18 @@ if __name__ == "__main__":
     
     print("\nUsage Example:")
     print("-" * 80)
-    print("# For single prediction:")
+    print("# For single prediction with confidence filtering:")
     print("from src.inference.emotion_inference import EmotionPredictor")
-    print("predictor = EmotionPredictor('models/fer_resnet18_best.pth')")
-    print("emotion, idx, probs = predictor.predict_emotion_from_frame(frame, (x, y, w, h))")
-    print(f"print(f'Emotion: {{emotion}}, Confidence: {{probs[idx]:.2%}}')")
+    print("")
+    print("# Create predictor with custom confidence threshold")
+    print("predictor = EmotionPredictor('models/fer_resnet18_best.pth', confidence_threshold=0.75)")
+    print("")
+    print("# Get prediction result")
+    print("result = predictor.predict_emotion_from_frame(frame, (x, y, w, h))")
+    print("")
+    print("# Check if prediction is confident")
+    print("if result['is_confident']:")
+    print("    print(f\"Emotion: {result['label']} ({result['max_prob']:.2%})\")")
+    print("else:")
+    print("    print(f\"Low confidence: {result['max_prob']:.2%} < threshold\")")
+    print("    # Treat as unknown/neutral or ignore this prediction")
