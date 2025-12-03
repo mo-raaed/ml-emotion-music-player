@@ -2,7 +2,8 @@
 FER2013 Dataset Module for Emotion Recognition
 
 This module handles loading and preprocessing of the FER2013 dataset,
-including remapping from 7 original classes to 4 target emotion classes.
+using only 4 clean emotions: Angry, Sad, Happy, Neutral (no merging).
+Filters out Disgust, Fear, and Surprise to create a cleaner dataset.
 """
 
 import pandas as pd
@@ -15,22 +16,23 @@ from typing import Tuple, Dict, List, Optional
 from collections import Counter
 
 
-# Class mapping from 7 original FER2013 classes to 4 target classes
-# Original FER2013 labels: 0=Angry, 1=Disgust, 2=Fear, 3=Happy, 4=Sad, 5=Surprise, 6=Neutral
+# Mapping from original FER2013 labels to our 4-class labels
+# We only keep: 0=Angry, 3=Happy, 4=Sad, 6=Neutral
+# We filter out: 1=Disgust, 2=Fear, 5=Surprise
 CLASS_MAPPING = {
-    0: 0,  # angry -> angry
-    1: 0,  # disgust -> angry
-    2: 1,  # fear -> sad
-    4: 1,  # sad -> sad
-    3: 2,  # happy -> happy
-    5: 3,  # surprise -> neutral
-    6: 3,  # neutral -> neutral
+    0: 0,  # Angry -> angry
+    4: 1,  # Sad -> sad
+    3: 2,  # Happy -> happy
+    6: 3,  # Neutral -> neutral
 }
+
+# Emotions to keep from original FER2013 (others will be filtered out)
+KEEP_EMOTIONS = {0, 3, 4, 6}  # Angry, Happy, Sad, Neutral
 
 # Target class names (4 classes, indexed 0-3)
 CLASS_NAMES = ["angry", "sad", "happy", "neutral"]
 
-# Number of classes after mapping
+# Number of classes
 NUM_CLASSES = 4
 
 
@@ -90,15 +92,17 @@ class Fer2013Dataset(Dataset):
         return image, target_label
 
 
-def load_fer2013_csv(csv_path: str) -> pd.DataFrame:
+def load_fer2013_csv(csv_path: str, filter_emotions: bool = True) -> pd.DataFrame:
     """
-    Load FER2013 CSV file.
+    Load FER2013 CSV file and optionally filter to keep only 4 clean emotions.
     
     Args:
         csv_path: Path to fer2013.csv
+        filter_emotions: If True, keep only emotions in KEEP_EMOTIONS {0, 3, 4, 6}
         
     Returns:
         DataFrame with columns: emotion, pixels, Usage
+        If filter_emotions=True, only contains Angry(0), Happy(3), Sad(4), Neutral(6)
     """
     df = pd.read_csv(csv_path)
     
@@ -107,6 +111,14 @@ def load_fer2013_csv(csv_path: str) -> pd.DataFrame:
     for col in required_columns:
         if col not in df.columns:
             raise ValueError(f"Missing required column: {col}")
+    
+    # Filter to keep only the 4 emotions we want
+    if filter_emotions:
+        original_size = len(df)
+        df = df[df['emotion'].isin(KEEP_EMOTIONS)].copy()
+        filtered_size = len(df)
+        print(f"Filtered dataset: {original_size:,} -> {filtered_size:,} samples "
+              f"(kept only emotions {sorted(KEEP_EMOTIONS)})")
     
     return df
 
@@ -267,30 +279,32 @@ if __name__ == "__main__":
     print(f"Test set:       {len(test_df):6,} samples")
     print(f"Total:          {len(train_df) + len(val_df) + len(test_df):6,} samples")
     
-    # Original class distribution (7 classes)
+    # Original class distribution (filtered 4 emotions)
     print("\n" + "-" * 60)
-    print("Original FER2013 Class Distribution (7 classes):")
+    print("Filtered FER2013 Class Distribution (original labels):")
     print("-" * 60)
     original_classes = {
-        0: "Angry", 1: "Disgust", 2: "Fear", 3: "Happy",
-        4: "Sad", 5: "Surprise", 6: "Neutral"
+        0: "Angry",
+        3: "Happy", 
+        4: "Sad",
+        6: "Neutral"
     }
     for label, name in original_classes.items():
         train_count = (train_df['emotion'] == label).sum()
         val_count = (val_df['emotion'] == label).sum()
         test_count = (test_df['emotion'] == label).sum()
         total_count = train_count + val_count + test_count
-        print(f"{name:10s} (label {label}): Train={train_count:5,}, Val={val_count:4,}, Test={test_count:4,}, Total={total_count:5,}")
+        print(f"{name:10s} (orig {label}): Train={train_count:5,}, Val={val_count:4,}, Test={test_count:4,}, Total={total_count:5,}")
     
-    # Target class distribution (4 classes)
+    # Target class distribution (4 classes after mapping)
     print("\n" + "-" * 60)
-    print("Target Class Distribution (4 classes after mapping):")
+    print("Mapped Class Distribution (4 contiguous classes):")
     print("-" * 60)
-    print("\nClass Mapping:")
-    print("  angry   <- Angry, Disgust")
-    print("  sad     <- Fear, Sad")
-    print("  happy   <- Happy")
-    print("  neutral <- Surprise, Neutral")
+    print("\nClass Mapping (no merging):")
+    print("  0: angry   <- Angry (orig 0)")
+    print("  1: sad     <- Sad (orig 4)")
+    print("  2: happy   <- Happy (orig 3)")
+    print("  3: neutral <- Neutral (orig 6)")
     print()
     
     train_dist = get_class_distribution(train_df)
@@ -334,6 +348,19 @@ if __name__ == "__main__":
     print(f"Labels shape: {labels.shape}")
     print(f"Labels in batch: {labels.tolist()[:10]}...")  # Show first 10 labels
     print(f"Unique labels in batch: {sorted(labels.unique().tolist())}")
+    
+    # Verify labels are in correct range [0, 1, 2, 3]
+    all_labels = []
+    for _, batch_labels in train_loader:
+        all_labels.extend(batch_labels.tolist())
+    unique_labels = sorted(set(all_labels))
+    
+    print("\n" + "-" * 60)
+    print("Label Validation:")
+    print("-" * 60)
+    print(f"All unique labels in training set: {unique_labels}")
+    print(f"Expected labels: [0, 1, 2, 3]")
+    print(f"✓ Validation passed!" if unique_labels == [0, 1, 2, 3] else "✗ Validation FAILED!")
     
     print("\n" + "=" * 60)
     print("Dataset loading test completed successfully!")
