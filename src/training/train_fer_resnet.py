@@ -400,6 +400,34 @@ def main(args):
     print(f"Number of classes: {NUM_CLASSES}")
     print(f"Class names: {CLASS_NAMES}")
     
+    # Compute class distribution for weighted loss
+    if not args.no_class_weights:
+        print("\n" + "-" * 80)
+        print("Computing class weights...")
+        print("-" * 80)
+        
+        # Count samples per class in training set
+        class_counts = torch.zeros(NUM_CLASSES, dtype=torch.long)
+        for _, labels in train_loader:
+            for label in labels:
+                class_counts[label] += 1
+        
+        print(f"Class counts (train): {class_counts.tolist()}")
+        for i, (name, count) in enumerate(zip(CLASS_NAMES, class_counts)):
+            percentage = (count / class_counts.sum()) * 100
+            print(f"  {name:8s} (label {i}): {count:5,} samples ({percentage:5.2f}%)")
+        
+        # Compute inverse-frequency weights: total / (num_classes * class_count)
+        # Higher weight means more emphasis in the loss for underrepresented classes
+        total_samples = class_counts.sum().float()
+        class_weights = total_samples / (NUM_CLASSES * class_counts.float())
+        
+        print(f"\nClass weights: {class_weights.tolist()}")
+        for i, (name, weight) in enumerate(zip(CLASS_NAMES, class_weights)):
+            print(f"  {name:8s}: {weight:.4f}x")
+        print("\nNote: Higher weight = more emphasis on that class in the loss")
+        print("      This helps balance learning across imbalanced classes")
+    
     # Create model
     print("\n" + "=" * 80)
     print("Creating Model...")
@@ -411,8 +439,17 @@ def main(args):
         use_gpu_if_available=True
     )
     
-    # Define loss function and optimizer
-    criterion = nn.CrossEntropyLoss()
+    # Define loss function with optional class weighting
+    if args.no_class_weights:
+        criterion = nn.CrossEntropyLoss()
+        print(f"\nLoss Function: CrossEntropyLoss (unweighted)")
+    else:
+        # Move class weights to device and create weighted loss
+        class_weights = class_weights.to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        print(f"\nLoss Function: CrossEntropyLoss (class-weighted)")
+        print(f"  Emphasizes underrepresented classes (angry, sad)")
+    
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     
     # Learning rate scheduler
@@ -424,7 +461,6 @@ def main(args):
     use_amp = device.type == 'cuda'
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
     
-    print(f"\nLoss Function: CrossEntropyLoss")
     print(f"Optimizer: Adam (lr={args.lr})")
     print(f"Scheduler: StepLR (step_size=7, gamma=0.1)")
     print(f"Mixed Precision (AMP): {'Enabled' if use_amp else 'Disabled (CPU mode)'}")
@@ -672,6 +708,12 @@ def parse_args():
         type=str,
         default=None,
         help='Path to checkpoint to resume training from (e.g., models/fer_resnet18_best.pth)'
+    )
+    
+    parser.add_argument(
+        '--no-class-weights',
+        action='store_true',
+        help='Disable class weighting in loss function (default: class weights enabled)'
     )
     
     return parser.parse_args()
