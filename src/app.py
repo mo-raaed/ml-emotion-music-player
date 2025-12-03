@@ -35,6 +35,13 @@ from src.music_player import EmotionMusicPlayer
 from src.data.fer2013_dataset import CLASS_NAMES
 
 
+# Configuration: Confidence threshold for emotion predictions
+# Only predictions with confidence >= this threshold will be used
+# Higher values (e.g., 0.85) increase precision but may miss some emotions
+# Lower values (e.g., 0.70) detect more emotions but with less certainty
+CONFIDENCE_THRESHOLD = 0.80
+
+
 # Colors for each emotion (BGR format)
 EMOTION_COLORS = {
     'angry': (0, 0, 255),      # Red
@@ -96,9 +103,12 @@ class EmotionMusicApp:
             print("  python train.py")
             raise FileNotFoundError(f"Model not found: {model_path}")
         
-        # Load emotion predictor
+        # Load emotion predictor with confidence threshold
         print("\n1. Loading emotion recognition model...")
-        self.emotion_predictor = EmotionPredictor(model_path)
+        self.emotion_predictor = EmotionPredictor(
+            model_path,
+            confidence_threshold=CONFIDENCE_THRESHOLD
+        )
         
         # Initialize face detector
         print("\n2. Initializing face detector...")
@@ -163,29 +173,37 @@ class EmotionMusicApp:
             # Predict emotion every N frames
             if self.frame_count % self.prediction_interval == 0:
                 try:
-                    # Predict emotion
-                    emotion, label_idx, probabilities = self.emotion_predictor.predict_emotion_from_frame(
+                    # Predict emotion with confidence filtering
+                    result = self.emotion_predictor.predict_emotion_from_frame(
                         frame, face_bbox
                     )
                     
-                    # Store prediction
-                    self.last_prediction = (emotion, probabilities)
+                    # Always store the latest prediction for UI display
+                    self.last_prediction = result
                     
-                    # Add to history
-                    self.emotion_history.append(emotion)
-                    
-                    # Check for dominant emotion change
-                    new_dominant = self.get_dominant_emotion()
-                    
-                    if new_dominant != self.dominant_emotion:
-                        self.dominant_emotion = new_dominant
-                        print(f"\n{'='*60}")
-                        print(f"Emotion changed: {self.dominant_emotion.upper()}")
-                        print(f"{'='*60}")
+                    # Only add to history and trigger music if confident
+                    if result['is_confident']:
+                        emotion = result['label']
                         
-                        # Play corresponding music
-                        if not self.is_muted:
-                            self.music_player.play_emotion(self.dominant_emotion)
+                        # Add to history
+                        self.emotion_history.append(emotion)
+                        
+                        # Check for dominant emotion change
+                        new_dominant = self.get_dominant_emotion()
+                        
+                        if new_dominant != self.dominant_emotion:
+                            self.dominant_emotion = new_dominant
+                            print(f"\n{'='*60}")
+                            print(f"Emotion changed: {self.dominant_emotion.upper()}")
+                            print(f"Confidence: {result['max_prob']:.2%}")
+                            print(f"{'='*60}")
+                            
+                            # Play corresponding music
+                            if not self.is_muted:
+                                self.music_player.play_emotion(self.dominant_emotion)
+                    else:
+                        # Low confidence - skip this prediction
+                        print(f"Low confidence prediction skipped: {result['max_prob']:.2%} < {CONFIDENCE_THRESHOLD:.2%}")
                 
                 except Exception as e:
                     print(f"Error predicting emotion: {e}")
@@ -211,16 +229,26 @@ class EmotionMusicApp:
         """
         # Draw face rectangle if detected
         if self.current_face_bbox is not None and self.last_prediction is not None:
-            emotion, probabilities = self.last_prediction
-            confidence = probabilities[CLASS_NAMES.index(emotion)]
-            color = EMOTION_COLORS.get(emotion, (255, 255, 255))
+            result = self.last_prediction
+            
+            # Check if prediction is confident
+            if result['is_confident']:
+                emotion = result['label']
+                confidence = result['max_prob']
+                color = EMOTION_COLORS.get(emotion, (255, 255, 255))
+                label = f"Current: {emotion}"
+            else:
+                # Low confidence - display as uncertain
+                confidence = result['max_prob']
+                color = (128, 128, 128)  # Gray for uncertain
+                label = "Low confidence"
             
             draw_face_rectangle(
                 frame,
                 self.current_face_bbox,
                 color=color,
                 thickness=3,
-                label=f"Current: {emotion}",
+                label=label,
                 confidence=confidence
             )
         
@@ -395,6 +423,17 @@ class EmotionMusicApp:
             frame,
             f"History: {len(self.emotion_history)}/{self.history_size}",
             (10, 85),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1
+        )
+        
+        # Confidence threshold
+        cv2.putText(
+            frame,
+            f"Confidence Threshold: {CONFIDENCE_THRESHOLD:.0%}",
+            (10, 110),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             (255, 255, 255),
