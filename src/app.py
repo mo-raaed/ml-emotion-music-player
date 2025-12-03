@@ -39,7 +39,7 @@ from src.data.fer2013_dataset import CLASS_NAMES
 # Only predictions with confidence >= this threshold will be used
 # Higher values (e.g., 0.85) increase precision but may miss some emotions
 # Lower values (e.g., 0.70) detect more emotions but with less certainty
-CONFIDENCE_THRESHOLD = 0.80
+CONFIDENCE_THRESHOLD = 0.70
 
 
 # Colors for each emotion (BGR format)
