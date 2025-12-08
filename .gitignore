@@ -9,16 +9,19 @@ __pycache__/
 .ipynb_checkpoints
 *.ipynb_checkpoints
 
-# PyTorch
+# PyTorch (exclude checkpoints but allow specific trained models)
 *.pth
 *.pt
+# Include the trained model checkpoint
+!models/fer_resnet18_best.pth
 
-# Data (exclude dataset but keep source code)
+# Data (exclude large dataset but keep source code)
 /data/
 *.csv
 *.jpg
-*.png
 *.jpeg
+# But include training results/visualizations in models/
+!models/*.png
 
 # But include source code in src/data/
 !src/data/**/*.py
@@ -41,3 +44,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# Include classification report in models/
+!models/classification_report.txt
