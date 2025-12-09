@@ -9,11 +9,9 @@ __pycache__/
 .ipynb_checkpoints
 *.ipynb_checkpoints
 
-# PyTorch (exclude checkpoints but allow specific trained models)
+# PyTorch (exclude checkpoints)
 *.pth
 *.pt
-# Include the trained model checkpoint
-!models/fer_resnet18_best.pth
 
 # Data (exclude large dataset but keep source code)
 /data/
